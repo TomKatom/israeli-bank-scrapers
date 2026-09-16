@@ -1,0 +1,90 @@
+# Tells us when this fork has fallen behind, and when it can be retired.
+#
+# The lab/hapoalim-otp branch carries a Hapoalim SMS-OTP implementation taken from
+# eshaham/israeli-bank-scrapers#1084, which upstream has neither merged nor rejected.
+# Two things are worth knowing without watching either repo by hand: that upstream has
+# cut a release we are not rebased onto, and that #1084 finally landed — at which point
+# our OTP commit should be deleted rather than rebased again.
+#
+# It reports by FAILING, not by opening an issue: a fork's GITHUB_TOKEN is refused
+# createIssue even with `issues: write` and issues enabled, and GitHub emails the repo
+# owner when a scheduled workflow fails. That also means no PAT to store and rotate, and
+# no de-duplication logic — the run is either red or it is not.
+name: Upstream drift
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Report drift even when there is none (tests the failure path)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM: eshaham/israeli-bank-scrapers
+  OTP_PR: "1084"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Compare this branch's base tag with the latest upstream release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          git remote add upstream "https://github.com/${UPSTREAM}.git"
+          git fetch --quiet --tags upstream
+
+          base=$(git describe --tags --abbrev=0 HEAD)
+          latest=$(gh api "repos/${UPSTREAM}/releases/latest" --jq .tag_name)
+          pr_state=$(gh api "repos/${UPSTREAM}/pulls/${OTP_PR}" --jq 'if .merged then "merged" else .state end')
+
+          {
+            echo "| | |"
+            echo "|---|---|"
+            echo "| this branch is based on | \`${base}\` |"
+            echo "| latest upstream release | \`${latest}\` |"
+            echo "| upstream PR #${OTP_PR} | ${pr_state} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$base" = "$latest" ] && [ "$pr_state" = "open" ] && [ "${FORCE}" != "true" ]; then
+            echo "Up to date with ${latest}; PR #${OTP_PR} still open. Nothing to do." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          {
+            echo
+            if [ "$pr_state" = "merged" ]; then
+              echo "### PR #${OTP_PR} has been merged upstream"
+              echo
+              echo "Drop the \`feat(hapoalim): support SMS OTP at login\` commit instead of rebasing"
+              echo "it, and keep only what upstream did not take."
+            else
+              echo "### Rebase needed"
+            fi
+            echo
+            echo '```'
+            echo "git fetch upstream --tags"
+            echo "git rebase --onto ${latest} ${base} lab/hapoalim-otp"
+            echo "npm ci && npm test"
+            echo "git push --force-with-lease"
+            echo '```'
+            echo
+            echo "Then bump the \`israeli-bank-scrapers\` pin in TomKatom/moneyman — it pins this"
+            echo "fork by commit SHA, so nothing moves until that pin moves."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "::error::lab/hapoalim-otp is based on ${base}; upstream is at ${latest}; PR #${OTP_PR} is ${pr_state}"
+          exit 1
