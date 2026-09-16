@@ -7,9 +7,9 @@ export const SECOND = 1000;
 type WaitUntilReturn<T> = T extends Falsy ? never : Promise<NonNullable<T>>;
 
 function timeoutPromise<T>(ms: number, promise: Promise<T>, description: string): Promise<T> {
+  let id: ReturnType<typeof setTimeout>;
   const timeout = new Promise((_, reject) => {
-    const id = setTimeout(() => {
-      clearTimeout(id);
+    id = setTimeout(() => {
       const error = new TimeoutError(description);
       reject(error);
     }, ms);
@@ -19,7 +19,7 @@ function timeoutPromise<T>(ms: number, promise: Promise<T>, description: string)
     promise,
     // casting to avoid type error- safe since this promise will always reject
     timeout as Promise<T>,
-  ]);
+  ]).finally(() => clearTimeout(id));
 }
 
 /**
