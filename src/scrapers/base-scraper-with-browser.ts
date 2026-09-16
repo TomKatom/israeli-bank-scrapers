@@ -324,6 +324,12 @@ class BaseScraperWithBrowser<TCredentials extends ScraperCredentials> extends Ba
           success: false,
           errorType: ScraperErrorTypes.ChangePassword,
         };
+      case LoginResults.TwoFactorRetrieverMissing:
+        this.emitProgress(ScraperProgressTypes.LoginFailed);
+        return {
+          success: false,
+          errorType: ScraperErrorTypes.TwoFactorRetrieverMissing,
+        };
       default:
         throw new Error(`unexpected login result "${loginResult}"`);
     }
