@@ -4,6 +4,9 @@ export { default as createScraper } from './scrapers/factory';
 // Note: the typo ScaperScrapingResult & ScraperLoginResult (sic) are exported here for backward compatibility
 export {
   ScraperLoginResult as ScaperLoginResult,
+  OTP_RESEND,
+  OtpCodeRetriever,
+  OtpCodeRetrieverOptions,
   ScraperScrapingResult as ScaperScrapingResult,
   Scraper,
   ScraperCredentials,

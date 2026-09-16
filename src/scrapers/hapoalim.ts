@@ -8,7 +8,7 @@ import { sleep, waitUntil } from '../helpers/waiting';
 import { type Transaction, TransactionStatuses, TransactionTypes, type TransactionsAccount } from '../transactions';
 import { BaseScraperWithBrowser, LoginResults, type PossibleLoginResults } from './base-scraper-with-browser';
 import { ScraperErrorTypes } from './errors';
-import { type ScraperLoginResult, type ScraperOptions } from './interface';
+import { OTP_RESEND, type OtpCodeRetriever, type ScraperLoginResult, type ScraperOptions } from './interface';
 import { getRawTransaction } from '../helpers/transactions';
 
 const debug = getDebug('hapoalim');
@@ -260,6 +260,15 @@ const OTP_FORM_SELECTOR = 'form.auth-otp-login';
 const OTP_SUBMIT_SELECTOR = '.btn-red_1';
 const OTP_ERROR_SELECTOR = '.errors-rb .error-message, .auth-otp-login .error';
 
+// The send-again control has no stable class of its own, so the label match below is the
+// real mechanism and these are only a fast path. Add one here if a stable hook shows up.
+const OTP_RESEND_SELECTORS = [
+  `${OTP_FORM_SELECTOR} .resend-code`,
+  `${OTP_FORM_SELECTOR} a.resend`,
+  `${OTP_FORM_SELECTOR} button.resend`,
+];
+const OTP_RESEND_PHRASES = ['שלח שוב', 'שליחה חוזרת', 'שלח קוד חדש', 'קוד חדש', 'send again', 'resend'];
+
 function getPossibleLoginResults(baseUrl: string) {
   const urls: PossibleLoginResults = {};
   urls[LoginResults.Success] = [
@@ -293,7 +302,7 @@ function createLoginFields(credentials: ScraperSpecificCredentials) {
 type ScraperSpecificCredentials = {
   userCode: string;
   password: string;
-  otpCodeRetriever?: (options?: { attempt: number }) => Promise<string>;
+  otpCodeRetriever?: OtpCodeRetriever;
 };
 
 class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials> {
@@ -346,9 +355,33 @@ class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials>
     }
 
     const MAX_OTP_ATTEMPTS = 3;
-    for (let attempt = 1; attempt <= MAX_OTP_ATTEMPTS; attempt++) {
+    const MAX_OTP_RESENDS = 3;
+    let attempt = 1;
+    let resends = 0;
+    let resent = false;
+    let resendFailed = false;
+
+    while (attempt <= MAX_OTP_ATTEMPTS) {
       debug(`2FA page detected, requesting OTP from caller (attempt ${attempt}/${MAX_OTP_ATTEMPTS})`);
-      const otpCode = await credentials.otpCodeRetriever({ attempt });
+      const otpCode = await credentials.otpCodeRetriever({ attempt, resent, resendFailed });
+      resent = false;
+      resendFailed = false;
+
+      if (otpCode === OTP_RESEND) {
+        if (resends >= MAX_OTP_RESENDS) {
+          debug('resend requested more than %d times, giving up', MAX_OTP_RESENDS);
+          return {
+            success: false,
+            errorType: ScraperErrorTypes.General,
+            errorMessage: `OTP resend requested more than ${MAX_OTP_RESENDS} times`,
+          };
+        }
+        resends += 1;
+        resent = await this.requestNewOtpCode();
+        resendFailed = !resent;
+        // Deliberately does not advance `attempt`: the bank counts wrong codes, not resends.
+        continue;
+      }
 
       debug('entering OTP code');
       const otpInputs = await this.page.$$(`${OTP_FORM_SELECTOR} input[type="text"]`);
@@ -422,7 +455,8 @@ class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials>
       }
 
       debug(`OTP attempt ${attempt} failed — inline error detected`);
-      if (attempt === MAX_OTP_ATTEMPTS) {
+      attempt += 1;
+      if (attempt > MAX_OTP_ATTEMPTS) {
         return {
           success: false,
           errorType: ScraperErrorTypes.General,
@@ -436,6 +470,40 @@ class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials>
       errorType: ScraperErrorTypes.General,
       errorMessage: 'OTP verification failed',
     };
+  }
+
+  /**
+   * Ask the bank for a fresh OTP. Returns false when no send-again control is on the form,
+   * so the caller can tell the user to use whatever code they already have.
+   */
+  private async requestNewOtpCode(): Promise<boolean> {
+    debug('requesting a new OTP code');
+
+    for (const selector of OTP_RESEND_SELECTORS) {
+      const handle = await this.page.$(selector);
+      if (handle) {
+        await handle.click();
+        debug('clicked resend control %s', selector);
+        await sleep(2000);
+        return true;
+      }
+    }
+
+    // ElementHandle.click dispatches real mouse events; a synthetic el.click() from inside
+    // evaluate() is ignored by this Angular app, same as the submit button.
+    const candidates = await this.page.$$(`${OTP_FORM_SELECTOR} a, ${OTP_FORM_SELECTOR} button`);
+    for (const handle of candidates) {
+      const text = (await handle.evaluate(el => el.textContent ?? '')).trim();
+      if (OTP_RESEND_PHRASES.some(phrase => text.includes(phrase))) {
+        await handle.click();
+        debug('clicked resend control labelled "%s"', text);
+        await sleep(2000);
+        return true;
+      }
+    }
+
+    debug('no resend control found in the OTP form');
+    return false;
   }
 
   async fetchData() {

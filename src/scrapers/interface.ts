@@ -3,10 +3,29 @@ import { type CompanyTypes, type ScraperProgressTypes } from '../definitions';
 import { type TransactionsAccount } from '../transactions';
 import { type ErrorResult, type ScraperErrorTypes } from './errors';
 
+/**
+ * Sentinel an `OtpCodeRetriever` may return instead of a code, asking the scraper to make
+ * the bank send a fresh OTP. Bank OTPs expire quickly, so a caller relaying the prompt to
+ * a human (chat message, push notification) will often be answered after the first code is
+ * already dead. A resend does not consume a login attempt.
+ */
+export const OTP_RESEND = '__RESEND__';
+
+export interface OtpCodeRetrieverOptions {
+  /** 1-based index of the current OTP submission attempt. Resends do not increment it. */
+  attempt: number;
+  /** True when the previous call asked for a resend and a new code was requested. */
+  resent?: boolean;
+  /** True when a resend was asked for but no send-again control could be found. */
+  resendFailed?: boolean;
+}
+
+export type OtpCodeRetriever = (options?: OtpCodeRetrieverOptions) => Promise<string>;
+
 // TODO: Remove this type when the scraper 'factory' will return concrete scraper types
 // Instead of a generic interface (which in turn uses this type)
 export type ScraperCredentials =
-  | { userCode: string; password: string; otpCodeRetriever?: (options?: { attempt: number }) => Promise<string> }
+  | { userCode: string; password: string; otpCodeRetriever?: OtpCodeRetriever }
   | { username: string; password: string }
   | { id: string; password: string }
   | { id: string; password: string; num: string }
@@ -14,7 +33,7 @@ export type ScraperCredentials =
   | { username: string; nationalID: string; password: string }
   | ({ email: string; password: string } & (
       | {
-          otpCodeRetriever: (options?: { attempt: number }) => Promise<string>;
+          otpCodeRetriever: OtpCodeRetriever;
           phoneNumber: string;
         }
       | {

@@ -3,7 +3,7 @@ import { maybeTestCompanyAPI, extendAsyncTimeout, getTestsConfig, exportTransact
 import { CompanyTypes, SCRAPERS } from '../definitions';
 import { BaseScraperWithBrowser, LoginResults } from './base-scraper-with-browser';
 import { ScraperErrorTypes } from './errors';
-import { type ScraperOptions } from './interface';
+import { OTP_RESEND, type ScraperOptions } from './interface';
 
 const COMPANY_ID = 'hapoalim'; // TODO this property should be hard-coded in the provider
 const testsConfig = getTestsConfig();
@@ -131,4 +131,92 @@ describe('Hapoalim 2FA (OTP)', () => {
       expect(otpCodeRetriever).not.toHaveBeenCalled();
     });
   });
+});
+
+describe('Hapoalim OTP resend', () => {
+  let superLogin: jest.SpyInstance;
+
+  beforeEach(() => {
+    superLogin = jest
+      .spyOn(BaseScraperWithBrowser.prototype, 'login')
+      .mockResolvedValue({ success: false, errorType: ScraperErrorTypes.TwoFactorRetrieverMissing });
+  });
+
+  afterEach(() => {
+    superLogin.mockRestore();
+  });
+
+  function buildOtpPage({ withResendControl = true } = {}) {
+    const state = { formPresent: true };
+    const resendHandle = {
+      click: jest.fn().mockResolvedValue(undefined),
+      evaluate: jest.fn().mockResolvedValue('שלח שוב'),
+    };
+
+    const page = {
+      $: jest.fn((selector: string) =>
+        Promise.resolve(selector === 'form.auth-otp-login' && state.formPresent ? {} : null),
+      ),
+      $$: jest.fn((selector: string) => {
+        if (selector.includes(' a,')) return Promise.resolve(withResendControl ? [resendHandle] : []);
+        return Promise.resolve([]);
+      }),
+      click: jest.fn(() => {
+        state.formPresent = false;
+        return Promise.resolve();
+      }),
+      evaluate: jest.fn().mockResolvedValue('https://www.bankhapoalim.co.il/ng-portals/rb/he/homepage'),
+    };
+
+    return { page, resendHandle };
+  }
+
+  function buildScraperWithPage(page: unknown) {
+    const scraper = buildScraper();
+    (scraper as unknown as { page: unknown }).page = page;
+    return scraper;
+  }
+
+  test('a resend asks the bank for a new code without consuming a login attempt', async () => {
+    const { page, resendHandle } = buildOtpPage();
+    const seen: unknown[] = [];
+    const otpCodeRetriever = jest.fn((options?: unknown) => {
+      seen.push(options);
+      return Promise.resolve(seen.length === 1 ? OTP_RESEND : '123456');
+    });
+
+    const result = await buildScraperWithPage(page).login({ userCode: 'x', password: 'y', otpCodeRetriever });
+
+    expect(result.success).toBe(true);
+    expect(resendHandle.click).toHaveBeenCalledTimes(1);
+    expect(seen).toEqual([
+      { attempt: 1, resent: false, resendFailed: false },
+      { attempt: 1, resent: true, resendFailed: false },
+    ]);
+  }, 20000);
+
+  test('reports resendFailed when the form carries no send-again control', async () => {
+    const { page } = buildOtpPage({ withResendControl: false });
+    const seen: unknown[] = [];
+    const otpCodeRetriever = jest.fn((options?: unknown) => {
+      seen.push(options);
+      return Promise.resolve(seen.length === 1 ? OTP_RESEND : '123456');
+    });
+
+    const result = await buildScraperWithPage(page).login({ userCode: 'x', password: 'y', otpCodeRetriever });
+
+    expect(result.success).toBe(true);
+    expect(seen[1]).toEqual({ attempt: 1, resent: false, resendFailed: true });
+  }, 20000);
+
+  test('gives up rather than resending forever', async () => {
+    const { page, resendHandle } = buildOtpPage();
+    const otpCodeRetriever = jest.fn().mockResolvedValue(OTP_RESEND);
+
+    const result = await buildScraperWithPage(page).login({ userCode: 'x', password: 'y', otpCodeRetriever });
+
+    expect(result.success).toBe(false);
+    expect(result.errorMessage).toMatch(/resend requested more than 3 times/i);
+    expect(resendHandle.click).toHaveBeenCalledTimes(3);
+  }, 30000);
 });
